@@ -1,0 +1,1407 @@
+package com.movie.service.impl;
+
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.stream.Collectors;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.elasticsearch.client.elc.NativeQuery;
+import org.springframework.data.elasticsearch.core.ElasticsearchOperations;
+import org.springframework.data.elasticsearch.core.SearchHitSupport;
+import org.springframework.data.elasticsearch.core.SearchHits;
+import org.springframework.data.elasticsearch.core.SearchPage;
+import org.springframework.data.elasticsearch.core.query.Query;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.movie.doc.MovieDoc;
+import com.movie.dto.MovieDTO;
+import com.movie.dto.SearchDTO;
+import com.movie.entity.Actor;
+import com.movie.entity.ActorInfo;
+import com.movie.entity.Director;
+import com.movie.entity.DirectorInfo;
+import com.movie.entity.Info;
+import com.movie.mapper.InfoMapper;
+import com.movie.repository.MovieRepository;
+import com.movie.service.IActorInfoService;
+import com.movie.service.IActorService; // 引入新的 Query 类
+import com.movie.service.IDirectorInfoService;
+import com.movie.service.IDirectorService;
+import com.movie.service.IMovieService;
+import com.movie.vo.MovieDetailVO;
+
+import cn.hutool.core.bean.BeanUtil;
+
+/**
+ * <p>
+ * 电影信息表 服务实现类
+ * </p>
+ *
+ * @author Liu
+ * @since 2025-12-25
+ */
+@Service
+public class InfoServiceImpl extends ServiceImpl<InfoMapper, Info> implements IMovieService {
+    // 注入关联表服务 (注意名字：IActorService 对应 movie_actor 表)
+    @Autowired
+    private IActorService actorRelationService; 
+
+    // 注入关联表服务 (注意名字：IDirectorService 对应 movie_director 表)
+    @Autowired
+    private IDirectorService directorRelationService;
+
+    //注入 ES Repository ---
+    @Autowired
+    private MovieRepository movieRepository;
+
+    @Autowired
+    private IActorInfoService actorInfoService;
+
+    @Autowired
+    private IDirectorInfoService directorInfoService;
+
+    @Autowired
+    private ElasticsearchOperations elasticsearchOperations;
+
+    @Override
+    @Transactional(rollbackFor = Exception.class) // 开启事务，任何一步报错都回滚
+    public void addMovie(MovieDTO dto) {
+        // 1. 保存电影基本信息 (Info 表)
+        Info movie = new Info();
+        BeanUtil.copyProperties(dto, movie);
+        
+        // 初始化统计数据
+        movie.setRating(BigDecimal.ZERO); 
+        movie.setReviewCount(0);
+        // 如果数据库有默认值这行可以省，为了保险起见设为false
+        movie.setIsDeleted(false); 
+        
+        this.save(movie); // 保存到数据库，自动生成 ID
+        Long movieId = movie.getId(); // 获取新生成的电影 ID
+
+        // 2. 保存演员关联 (Actor 表: movie_actor)
+        if (dto.getActorIds() != null && !dto.getActorIds().isEmpty()) {
+            for (Long actorId : dto.getActorIds()) {
+                Actor relation = new Actor(); // 这是关联对象
+                relation.setMovieId(movieId);
+                relation.setActorId(actorId);
+                actorRelationService.save(relation);
+            }
+        }
+
+        // 3. 保存导演关联 (Director 表: movie_director)
+        if (dto.getDirectorIds() != null && !dto.getDirectorIds().isEmpty()) {
+            for (Long directorId : dto.getDirectorIds()) {
+                Director relation = new Director(); // 这是关联对象
+                relation.setMovieId(movieId);
+                relation.setDirectorId(directorId);
+                directorRelationService.save(relation);
+            }
+        }
+
+        // 【数据同步到 Elasticsearch】
+        // 4. 根据 ID 查出演员名和导演名
+        List<String> actorNames = Collections.emptyList();
+        if (dto.getActorIds() != null && !dto.getActorIds().isEmpty()) {
+            actorNames = actorInfoService.listByIds(dto.getActorIds())
+                    .stream().map(ActorInfo::getName).collect(Collectors.toList());
+        }
+
+        List<String> directorNames = Collections.emptyList();
+        if (dto.getDirectorIds() != null && !dto.getDirectorIds().isEmpty()) {
+            directorNames = directorInfoService.listByIds(dto.getDirectorIds())
+                    .stream().map(DirectorInfo::getName).collect(Collectors.toList());
+        }
+
+        // 5. 组装 MovieDoc 对象
+        MovieDoc doc = new MovieDoc();
+        BeanUtil.copyProperties(dto, doc); // 把 dto 的 title, genre 等信息拷过来
+        doc.setId(movieId); // 设置 ES 文档的 ID
+        doc.setPosterUrl(dto.getPosterUrl()); // 显式赋值海报
+        doc.setActors(actorNames);
+        doc.setDirectors(directorNames);
+        if (dto.getReleaseDate() != null) doc.setReleaseDate(dto.getReleaseDate().toString());
+        doc.setRating(0.0); 
+
+        // 6. 保存到 ES
+        movieRepository.save(doc);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public Page<MovieDoc> search(SearchDTO dto) {
+        // 1. 构建分页请求 (这部分不变)
+        PageRequest pageRequest = PageRequest.of(dto.getPage() - 1, dto.getSize());
+
+        // 2. 构建 ES 查询条件 (Spring Boot 3.x 全新写法)
+        Query query = NativeQuery.builder()
+                .withQuery(q -> q
+                        .multiMatch(mq -> mq
+                                .query(dto.getKeyword())
+                                .fields("title", "originalTitle", "actors", "directors", "synopsis")
+                        )
+                )
+                .withPageable(pageRequest)
+                .build();
+
+        // 3. 执行查询 (这部分不变)
+        SearchHits<MovieDoc> searchHits = elasticsearchOperations.search(query, MovieDoc.class);
+        
+        // 4. 转换成分页对象 (这部分不变)
+        SearchPage<MovieDoc> searchPage = SearchHitSupport.searchPageFor(searchHits, pageRequest);
+
+        return (Page<MovieDoc>) SearchHitSupport.unwrapSearchHits(searchPage);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void updateMovie(MovieDTO dto) {
+        // 1. 更新 MySQL 主表
+        Info movie = new Info();
+        BeanUtil.copyProperties(dto, movie);
+        // 如果 dto.id 为空，抛异常
+        if (movie.getId() == null) throw new RuntimeException("修改必须指定ID");
+        this.updateById(movie);
+
+        // 2. 更新关联关系 (先删后加，这是处理多对多更新最稳妥的策略)
+        // 2.1 删除旧的演员关联
+        QueryWrapper<Actor> actorDeleteWrapper = new QueryWrapper<>();
+        actorDeleteWrapper.eq("movie_id", movie.getId());
+        actorRelationService.remove(actorDeleteWrapper);
+        
+        // 2.2 删除旧的导演关联
+        QueryWrapper<Director> directorDeleteWrapper = new QueryWrapper<>();
+        directorDeleteWrapper.eq("movie_id", movie.getId());
+        directorRelationService.remove(directorDeleteWrapper);
+
+        // 2.3 插入新的演员关联
+        if (dto.getActorIds() != null && !dto.getActorIds().isEmpty()) {
+            for (Long actorId : dto.getActorIds()) {
+                Actor relation = new Actor();
+                relation.setMovieId(movie.getId());
+                relation.setActorId(actorId);
+                actorRelationService.save(relation);
+            }
+        }
+
+        // 2.4 插入新的导演关联
+        if (dto.getDirectorIds() != null && !dto.getDirectorIds().isEmpty()) {
+            for (Long directorId : dto.getDirectorIds()) {
+                Director relation = new Director();
+                relation.setMovieId(movie.getId());
+                relation.setDirectorId(directorId);
+                directorRelationService.save(relation);
+            }
+        }
+
+        // 3. 同步更新 Elasticsearch
+        // 查出最新的名字
+        List<String> actorNames = Collections.emptyList();
+        if (dto.getActorIds() != null && !dto.getActorIds().isEmpty()) {
+            actorNames = actorInfoService.listByIds(dto.getActorIds())
+                    .stream().map(ActorInfo::getName).collect(Collectors.toList());
+        }
+        List<String> directorNames = Collections.emptyList();
+        if (dto.getDirectorIds() != null && !dto.getDirectorIds().isEmpty()) {
+            directorNames = directorInfoService.listByIds(dto.getDirectorIds())
+                    .stream().map(DirectorInfo::getName).collect(Collectors.toList());
+        }
+
+        MovieDoc doc = new MovieDoc();
+        BeanUtil.copyProperties(dto, doc); // 此时 dto 里有 id
+        doc.setPosterUrl(dto.getPosterUrl());
+        doc.setActors(actorNames);
+        doc.setDirectors(directorNames);
+        if (dto.getReleaseDate() != null) doc.setReleaseDate(dto.getReleaseDate().toString());
+        
+        // save 方法在 ES 里是 "Upsert" (有则更新，无则新增)
+        movieRepository.save(doc);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void removeMovie(Long id) {
+        // 1. MySQL 逻辑删除 (因为加了 @TableLogic)
+        this.removeById(id);
+
+        // 2. ES 物理删除 (搜不到才是目的)
+        movieRepository.deleteById(id);
+    }
+
+    @Override
+    public MovieDetailVO getMovieDetail(Long id) {
+        // 1. 查电影主表
+        Info movie = this.getById(id);
+        if (movie == null) throw new RuntimeException("电影不存在");
+
+        MovieDetailVO vo = new MovieDetailVO();
+        BeanUtil.copyProperties(movie, vo);
+
+        // 2. 查演员关联关系 (movie_actor) -> 拿到 actorId 列表
+        QueryWrapper<Actor> actorQuery = new QueryWrapper<>();
+        actorQuery.eq("movie_id", id);
+        List<Actor> actorRelations = actorRelationService.list(actorQuery);
+        
+        if (!actorRelations.isEmpty()) {
+            List<Long> actorIds = actorRelations.stream().map(Actor::getActorId).collect(Collectors.toList());
+            // 3. 查演员详情 (actor_info)
+            List<ActorInfo> actorInfos = actorInfoService.listByIds(actorIds);
+            vo.setActorList(actorInfos);
+        }
+
+        // 4. 查导演关联关系 (movie_director) -> 拿到 directorId 列表
+        QueryWrapper<Director> directorQuery = new QueryWrapper<>();
+        directorQuery.eq("movie_id", id);
+        List<Director> directorRelations = directorRelationService.list(directorQuery);
+        
+        if (!directorRelations.isEmpty()) {
+            List<Long> directorIds = directorRelations.stream().map(Director::getDirectorId).collect(Collectors.toList());
+            // 5. 查导演详情 (director_info)
+            List<DirectorInfo> directorInfos = directorInfoService.listByIds(directorIds);
+            vo.setDirectorList(directorInfos);
+        }
+
+        return vo;
+    }
+
+    @Override
+    public void syncEsData() {
+        // 1. 先清空 ES 中的旧数据 (防止重复或脏数据)
+        movieRepository.deleteAll();
+
+        // 2. 查出 MySQL 里所有的电影
+        List<Info> allMovies = this.list();
+        if (allMovies.isEmpty()) return;
+
+        List<MovieDoc> docs = new ArrayList<>();
+
+        // 3. 遍历每一部电影，组装数据
+        for (Info movie : allMovies) {
+            MovieDoc doc = new MovieDoc();
+            BeanUtil.copyProperties(movie, doc);
+
+            doc.setPosterUrl(movie.getPosterUrl()); // 确保海报地址存入
+            if (movie.getRating() != null) {
+                doc.setRating(movie.getRating().doubleValue()); // BigDecimal 转为 Double
+            }
+            if (movie.getReleaseDate() != null) {
+                doc.setReleaseDate(movie.getReleaseDate().toString()); // LocalDate 转为 String
+            }
+
+            // --- 查演员名字 ---
+            // 查中间表
+            QueryWrapper<Actor> actorQuery = new QueryWrapper<>();
+            actorQuery.eq("movie_id", movie.getId());
+            List<Actor> actorRelations = actorRelationService.list(actorQuery);
+            
+            List<String> actorNames = new ArrayList<>();
+            if (!actorRelations.isEmpty()) {
+                List<Long> actorIds = actorRelations.stream().map(Actor::getActorId).collect(Collectors.toList());
+                // 查信息表
+                List<ActorInfo> actors = actorInfoService.listByIds(actorIds);
+                actorNames = actors.stream().map(ActorInfo::getName).collect(Collectors.toList());
+            }
+            doc.setActors(actorNames);
+
+            // --- 查导演名字 ---
+            QueryWrapper<Director> directorQuery = new QueryWrapper<>();
+            directorQuery.eq("movie_id", movie.getId());
+            List<Director> directorRelations = directorRelationService.list(directorQuery);
+
+            List<String> directorNames = new ArrayList<>();
+            if (!directorRelations.isEmpty()) {
+                List<Long> directorIds = directorRelations.stream().map(Director::getDirectorId).collect(Collectors.toList());
+                List<DirectorInfo> directors = directorInfoService.listByIds(directorIds);
+                directorNames = directors.stream().map(DirectorInfo::getName).collect(Collectors.toList());
+            }
+            doc.setDirectors(directorNames);
+
+            // 加入待保存列表
+            docs.add(doc);
+        }
+
+        // 4. 批量保存到 ES (性能比一条条存快得多)
+        movieRepository.saveAll(docs);
+    }
+}
+package com.movie.service.impl;
+
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import com.movie.websocket.WebSocketServer;
+
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl; // 引入 RedisLockService
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.movie.config.RabbitMQConfig;
+import com.movie.dto.OrderDTO;
+import com.movie.dto.PayDTO;
+import com.movie.entity.CinemaHall;
+import com.movie.entity.CinemaInfo;
+import com.movie.entity.Info;
+import com.movie.entity.Order;
+import com.movie.entity.Schedule;
+import com.movie.entity.UserWallet;
+import com.movie.entity.WalletLog;
+import com.movie.mapper.OrderMapper;
+import com.movie.service.ICinemaHallService;
+import com.movie.service.ICinemaInfoService;
+import com.movie.service.IMovieService;
+import com.movie.service.IOrderService;
+import com.movie.service.IScheduleService;
+import com.movie.service.IUserWalletService;
+import com.movie.service.IWalletLogService;
+import com.movie.service.RedisLockService;
+import com.movie.vo.SeatInfoVO; // 引入 Set
+
+import cn.hutool.core.util.IdUtil;
+import cn.hutool.crypto.digest.BCrypt;
+
+@Service
+public class OrderServiceImpl extends ServiceImpl<OrderMapper, Order> implements IOrderService {
+
+    @Autowired
+    private IScheduleService scheduleService;
+    @Autowired
+    private ICinemaHallService hallService;
+    @Autowired
+    private StringRedisTemplate redisTemplate;
+    @Autowired
+    private ObjectMapper objectMapper;
+    @Autowired
+    private RabbitTemplate rabbitTemplate;
+    @Autowired
+    private RedisLockService redisLockService; // 注入新的锁服务
+    @Autowired
+    private IUserWalletService userWalletService;
+    @Autowired
+    private IWalletLogService walletLogService;
+    @Autowired
+    private IMovieService movieService;       // 【新增】用于查电影名
+    @Autowired
+    private ICinemaInfoService cinemaService;
+
+    // --- 1. 获取座位图 (含坏座处理) ---
+    @Override
+    @SuppressWarnings("UseSpecificCatch")
+    public SeatInfoVO getSeatInfo(Long scheduleId) throws Exception {
+        // 1. 查询排片信息
+        Schedule schedule = scheduleService.getById(scheduleId);
+        if (schedule == null) {
+            throw new RuntimeException("该排片场次不存在或已下架");
+        }
+
+        // 2. 【新增】查询关联的 电影、影院、影厅 信息
+        // 前端右侧卡片需要这些数据，否则会显示空白或默认值
+        Info movie = movieService.getById(schedule.getMovieId());
+        CinemaInfo cinema = cinemaService.getById(schedule.getCinemaId());
+        CinemaHall hall = hallService.getById(schedule.getHallId());
+
+        if (hall == null || movie == null || cinema == null) {
+            throw new RuntimeException("排片关联信息缺失(影厅/电影/影院)");
+        }
+
+        // 3. 解析影厅座位配置 (JSON -> Map)
+        Map<String, Object> hallConfig = null;
+        try {
+            hallConfig = objectMapper.readValue(
+                hall.getSeatConfig(), 
+                new TypeReference<Map<String, Object>>() {}
+            );
+        } catch (Exception e) {
+            // 容错处理：如果解析失败，给个默认空对象，防止整个页面打不开
+            hallConfig = new HashMap<>();
+            hallConfig.put("rows", 0);
+            hallConfig.put("cols", 0);
+        }
+
+        // 4. 安全提取坏座 (broken_seats)
+        // 解决 unchecked 警告，先判断是否存在且类型是否正确
+        List<String> brokenSeats = new ArrayList<>();
+        if (hallConfig.containsKey("broken_seats")) {
+            Object brokenObj = hallConfig.get("broken_seats");
+            if (brokenObj instanceof List) {
+                // 安全转换
+                List<?> list = (List<?>) brokenObj;
+                for (Object item : list) {
+                    brokenSeats.add(item.toString());
+                }
+            }
+        }
+
+        // 5. 查询【已售出】座位 (从数据库)
+        // 逻辑：查询该场次下，状态为 "已支付(1)" 或 "已观影(4)" 的订单
+        // 如果你有 "待支付(0)" 但没存 Redis 的逻辑，也要加上 0
+        QueryWrapper<Order> soldQuery = new QueryWrapper<>();
+        soldQuery.eq("schedule_id", scheduleId)
+                .in("status", 1, 4); // 假设 1=已支付, 4=已完成。具体看你的状态定义
+             // .ne("status", 2); // 或者直接查“不等于已取消”的所有订单
+
+        List<Order> soldOrders = this.list(soldQuery);
+    
+        // 将订单里的座位号字符串 "1-1,1-2" 拆分并收集
+        List<String> finalSoldSeats = soldOrders.stream()
+                .filter(o -> o.getSeatInfo() != null)
+                .flatMap(order -> Arrays.stream(order.getSeatInfo().split(",")))
+                .collect(Collectors.toList());
+
+        // 6. 查询【锁定中】座位 (从 Redis)
+        // 这里的 Key 格式必须和 createOrder 存入 Redis 时保持一致
+        String lockKeyPattern = "lock:seat:" + scheduleId + ":*";
+        Set<String> lockedKeys = redisTemplate.keys(lockKeyPattern);
+    
+        if (lockedKeys != null && !lockedKeys.isEmpty()) {
+            List<String> lockedSeats = lockedKeys.stream()
+                    // 假设 key 是 "lock:seat:101:5-6"，截取最后的 "5-6"
+                    .map(key -> key.substring(key.lastIndexOf(":") + 1))
+                    .collect(Collectors.toList());
+            finalSoldSeats.addAll(lockedSeats);
+        }
+
+        // 7. 组装 VO 返回
+        SeatInfoVO vo = new SeatInfoVO();
+    
+        // --- 填充基础座位信息 ---
+        vo.setHallConfig(hallConfig);
+        vo.setBrokenSeats(brokenSeats);
+        vo.setSoldSeats(finalSoldSeats.stream().distinct().collect(Collectors.toList())); // 去重
+
+        // --- 【关键】填充右侧详情信息 ---
+        vo.setMovieTitle(movie.getTitle());
+        vo.setCinemaName(cinema.getName());
+        vo.setHallName(hall.getName());
+        vo.setPrice(schedule.getPrice());
+        vo.setStartTime(schedule.getStartTime());
+
+        return vo;
+    }
+    
+
+    // --- 锁座并创建订单 ---
+    @SuppressWarnings("unchecked")
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public String createOrder(OrderDTO dto, Long userId) {
+        // --- 1. 数据清洗与格式验证 ---
+        List<String> rawSeats = dto.getSeats();
+        if (rawSeats == null || rawSeats.isEmpty()) {
+            throw new RuntimeException("请选择座位");
+        }
+
+        Set<String> distinctSet = new HashSet<>();
+        for (String seatStr : rawSeats) {
+            // 防御性编程：以逗号分割，防止前端传 ["5-6,5-7"] 这种怪异格式
+            String[] splitSeats = seatStr.split(",");
+            for (String s : splitSeats) {
+                // 去除空格 " 5-6 " -> "5-6"
+                String cleanSeat = s.trim();
+                if (cleanSeat.isEmpty()) {
+                    continue;
+                }
+                if (distinctSet.contains(cleanSeat)) {
+                    throw new RuntimeException("订单中包含重复座位: " + cleanSeat);
+                }
+                distinctSet.add(cleanSeat);
+            }
+        }
+
+        if (distinctSet.isEmpty()) {
+            throw new RuntimeException("有效座位为空");
+        }
+
+        // 转回 List，确保后续所有逻辑都使用这个清洗过的 finalSeats
+        List<String> finalSeats = new ArrayList<>(distinctSet);
+
+        // --- 2. 尝试原子锁座 (使用 Lua 脚本) ---
+        // 使用 finalSeats 生成 Key，这样就是标准的 lock:seat:4:5-6 了
+        boolean lockSuccess = redisLockService.tryLockSeats(dto.getScheduleId(), finalSeats, userId);
+        if (!lockSuccess) {
+            throw new RuntimeException("部分座位已被锁定，请重新选择");
+        }
+
+        try {
+            // 3. 校验排片是否存在
+            Schedule schedule = scheduleService.getById(dto.getScheduleId());
+            if (schedule == null) {
+                throw new RuntimeException("排片不存在");
+            }
+            // 如果 (开场时间 < 当前时间)，说明已经开演了，不能卖票
+            if (schedule.getStartTime().isBefore(LocalDateTime.now())) {
+                redisLockService.releaseSeatLocks(dto.getScheduleId(), finalSeats);
+                throw new RuntimeException("电影已开场，停止售票！");
+            }
+
+            CinemaHall hall = hallService.getById(schedule.getHallId());
+
+
+            if (hall == null) {
+                throw new RuntimeException("关联影厅不存在");
+            }
+
+            // --- 检查是否选了坏座 ---
+            Map<String, Object> config;
+            try {
+                config = objectMapper.readValue(
+                    hall.getSeatConfig(), 
+                    new TypeReference<Map<String, Object>>() {}
+                );
+            } catch (JsonProcessingException e) {
+                // 如果解析失败，说明数据库里的 JSON 格式不对
+                // 【关键步骤】必须释放刚才锁住的座位！
+                redisLockService.releaseSeatLocks(dto.getScheduleId(), finalSeats);
+                throw new RuntimeException("影厅座位数据异常，无法下单");
+            }
+            
+            // 提取坏座列表
+            List<String> brokenSeats = new ArrayList<>();
+            if (config.containsKey("broken_seats")) {
+                brokenSeats = (List<String>) config.get("broken_seats");
+            }
+
+            int maxRow = (int) config.get("rows");
+            int maxCol = (int) config.get("cols");
+
+            for (String seat : finalSeats) {
+                // 1. 检查是否是坏座
+                if (brokenSeats.contains(seat)) {
+                    throw new RuntimeException("座位 " + seat + " 是损坏座位，无法购买");
+                }
+
+                // 2. 检查边界 (之前的逻辑)
+                String[] parts = seat.split("-");
+                int row = Integer.parseInt(parts[0]);
+                int col = Integer.parseInt(parts[1]);
+                if (row < 1 || row > maxRow || col < 1 || col > maxCol) {
+                    throw new RuntimeException("座位 " + seat + " 不存在");
+                }
+            }
+
+            // 4. 双重检查数据库 (已支付的作为兜底)
+            QueryWrapper<Order> checkQuery = new QueryWrapper<>();
+            checkQuery.eq("schedule_id", dto.getScheduleId())
+                    .eq("status", 1) // 已支付
+                    .in("seat_info", finalSeats); // MybatisPlus 会自动处理 List in ('5-6', '5-7')
+
+            if (this.count(checkQuery) > 0) {
+                throw new RuntimeException("部分座位已售出");
+            }
+
+            // 5. 计算金额 (现在 finalSeats.size() 是真实的座位数了)
+            BigDecimal price = schedule.getPrice();
+            BigDecimal count = new BigDecimal(finalSeats.size());
+            BigDecimal totalPrice = price.multiply(count);
+
+            // 6. 创建订单
+            Order order = new Order();
+            String orderNo = IdUtil.getSnowflakeNextIdStr();
+            order.setOrderNo(orderNo);
+            order.setUserId(userId);
+            order.setScheduleId(dto.getScheduleId());
+            // 存入数据库的是标准格式 "5-6,5-7"
+            order.setSeatInfo(String.join(",", finalSeats));
+            order.setTotalPrice(totalPrice);
+            order.setStatus(0);
+            this.save(order);
+
+            // 7. 发送延迟消息
+            rabbitTemplate.convertAndSend(RabbitMQConfig.ORDER_TTL_QUEUE, orderNo);
+
+            return orderNo;
+
+        } catch (RuntimeException e) {
+            // 失败释放锁
+            redisLockService.releaseSeatLocks(dto.getScheduleId(), finalSeats);
+            throw e; // 继续抛出异常给Controller
+        }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class) // 【核心】开启事务：只要下面任何一行报错，所有数据库操作自动回滚！
+    public void payOrder(PayDTO dto, Long userId) {
+        // 1. 查询并校验订单
+        QueryWrapper<Order> query = new QueryWrapper<>();
+        query.eq("order_no", dto.getOrderNo()).eq("user_id", userId);
+        Order order = this.getOne(query);
+
+        if (order == null) {
+            throw new RuntimeException("订单不存在或不属于当前用户");
+        }
+        if (order.getStatus() != 0) { // 0-待支付
+            throw new RuntimeException("订单状态异常，无法支付"); // 抛出异常 -> 触发回滚
+        }
+
+        // 2. 查询用户钱包
+        QueryWrapper<UserWallet> walletQuery = new QueryWrapper<>();
+        walletQuery.eq("user_id", userId);
+        UserWallet wallet = userWalletService.getOne(walletQuery);
+        if (wallet == null) {
+            throw new RuntimeException("用户钱包不存在"); // 抛出异常 -> 触发回滚
+        }
+
+        // 3. 【核心】校验是否设置了支付密码
+        if (wallet.getPayPassword() == null) {
+            throw new RuntimeException("未设置支付密码，请先前往设置！");
+        }
+
+        // 4. 【核心】校验支付密码是否正确
+        if (!BCrypt.checkpw(dto.getPayPassword(), wallet.getPayPassword())) {
+            throw new RuntimeException("支付密码错误"); // 抛出异常 -> 触发回滚
+        }
+
+        // 5. 【核心】余额校验 (Balance Check)
+        // wallet.getBalance() < order.getTotalPrice()
+        if (wallet.getBalance().compareTo(order.getTotalPrice()) < 0) {
+            throw new RuntimeException("余额不足，请充值！"); // 抛出异常 -> 触发回滚
+        }
+
+        // --- 到这里说明一切正常，开始执行扣款和更新 ---
+        try {
+            // 6. 扣减余额
+            BigDecimal newBalance = wallet.getBalance().subtract(order.getTotalPrice());
+            wallet.setBalance(newBalance);
+
+            // 这里利用了 MyBatis-Plus 的乐观锁插件（如果配置了 @Version），可以防止并发扣款
+            boolean updateWalletSuccess = userWalletService.updateById(wallet);
+            if (!updateWalletSuccess) {
+                throw new RuntimeException("扣款失败，请重试"); // 并发冲突时回滚
+            }
+
+            // 7. 修改订单状态为“已支付”
+            order.setStatus(1); // 1-已支付
+            order.setPayTime(LocalDateTime.now());
+            boolean updateOrderSuccess = this.updateById(order);
+            if (!updateOrderSuccess) {
+                throw new RuntimeException("更新订单状态失败"); // 回滚钱包扣款
+            }
+
+            // 8. 支付成功，释放 Redis 座位锁
+            // 因为座位已经永久属于用户了（存入数据库了），不再需要 Redis 的临时锁
+            Schedule schedule = scheduleService.getById(order.getScheduleId());
+
+            if (schedule != null) {
+                redisLockService.releaseSeatLocks(schedule.getId(), List.of(order.getSeatInfo().split(",")));
+            }
+
+            // --- 新增：推送通知 ---
+            WebSocketServer.sendInfo(userId.toString(), " 支付成功！祝您观影愉快！");
+
+            // 8. 记录支出流水
+            WalletLog walletLog = new WalletLog(); 
+            walletLog.setUserId(userId);
+            walletLog.setAmount(order.getTotalPrice().negate()); 
+            walletLog.setType((byte) 2); // 2-购票
+            walletLog.setOrderNo(order.getOrderNo());
+            walletLog.setRemark("购买电影票: " + order.getSeatInfo());
+            walletLogService.save(walletLog);
+
+        } catch (RuntimeException e) {
+            // 捕获所有未知异常，手动抛出 RuntimeException 以确保事务回滚
+            throw new RuntimeException("支付过程中发生错误: " + e.getMessage());
+        }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class) // 【核心】开启事务：钱和状态必须同时成功
+    public void refundOrder(String orderNo, Long userId) {
+        // 1. 查询并校验订单
+        QueryWrapper<Order> query = new QueryWrapper<>();
+        query.eq("order_no", orderNo).eq("user_id", userId);
+        Order order = this.getOne(query);
+
+        if (order == null) {
+            throw new RuntimeException("订单不存在或不属于当前用户");
+        }
+
+        // 只有 "已支付(1)" 的订单才能退款
+        // 待支付(0)的应该走取消流程，已取消(2)或已退款(3)的不能重复退
+        if (order.getStatus() != 1) {
+            throw new RuntimeException("订单状态异常，无法退款（仅已支付订单可退）");
+        }
+
+        // --- 新增：核心时间校验 ---
+        Schedule schedule = scheduleService.getById(order.getScheduleId());
+        // 如果电影已经开始了，就不让退了 (通常规定开场前15分钟不能退，这里简单点，开场后不能退)
+        if (schedule.getStartTime().isBefore(LocalDateTime.now())) {
+            throw new RuntimeException("电影已开场，无法退票");
+        }
+        // -------------------------
+
+        // 2. 查询用户钱包
+        QueryWrapper<UserWallet> walletQuery = new QueryWrapper<>();
+        walletQuery.eq("user_id", userId);
+        UserWallet wallet = userWalletService.getOne(walletQuery);
+        if (wallet == null) {
+            throw new RuntimeException("用户钱包不存在");
+        }
+
+        try {
+            // 3. 【核心】执行退款：余额加回去
+            // balance = balance + totalPrice
+            BigDecimal refundAmount = order.getTotalPrice();
+            BigDecimal newBalance = wallet.getBalance().add(refundAmount);
+            wallet.setBalance(newBalance);
+
+            boolean updateWalletSuccess = userWalletService.updateById(wallet);
+            if (!updateWalletSuccess) {
+                throw new RuntimeException("退款入账失败");
+            }
+
+            // 4. 【核心】修改订单状态
+            order.setStatus(3); // 3-已退款
+            // (可选) 可以加一个 refund_time 字段记录退款时间，这里为了简化省略
+            boolean updateOrderSuccess = this.updateById(order);
+            if (!updateOrderSuccess) {
+                throw new RuntimeException("更新订单状态失败"); // 回滚钱包
+            }
+
+            // 5. 【兜底】清理 Redis 锁
+            // 虽然支付成功时应该已经释放了锁，但为了防止当时释放失败导致死锁，
+            // 这里再执行一次释放操作，确保座位彻底回归自由。
+            
+            redisLockService.releaseSeatLocks(schedule.getId(), List.of(order.getSeatInfo().split(",")));
+            
+            WebSocketServer.sendInfo(userId.toString(), " 退款成功！金额已返回钱包。");
+        
+            // 6. 记录收入流水
+            WalletLog walletLog = new WalletLog();
+            walletLog.setUserId(userId);
+            walletLog.setAmount(order.getTotalPrice()); // 收入为正
+            walletLog.setType((byte) 3); // 3-退款
+            walletLog.setOrderNo(order.getOrderNo());
+            walletLog.setRemark("订单退款");
+            walletLogService.save(walletLog);
+
+        } catch (RuntimeException e) {
+            // 捕获异常，抛出 RuntimeException 触发回滚
+            throw new RuntimeException("退款失败: " + e.getMessage());
+        }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void cancelOrder(String orderNo, Long userId) {
+        // 1. 查询订单
+        QueryWrapper<Order> query = new QueryWrapper<>();
+        query.eq("order_no", orderNo).eq("user_id", userId);
+        Order order = this.getOne(query);
+
+        if (order == null) {
+            throw new RuntimeException("订单不存在");
+        }
+
+        // 2. 只有“待支付”的订单可以手动取消
+        if (order.getStatus() != 0) {
+            throw new RuntimeException("订单状态已改变，无法取消");
+        }
+
+        try {
+            // 3. 修改状态为“已取消”
+            order.setStatus(2); // 2-已取消
+            // (可选) setCancelTime
+            this.updateById(order);
+
+            // 4. 【核心】立刻释放 Redis 座位锁
+            // 这样别人就能马上买这几个座了，不用等15分钟
+            Schedule schedule = scheduleService.getById(order.getScheduleId());
+            if (schedule != null) {
+                redisLockService.releaseSeatLocks(schedule.getId(), List.of(order.getSeatInfo().split(",")));
+            }
+            WebSocketServer.sendInfo(userId.toString(), " 订单取消成功！");
+
+        } catch (Exception e) {
+            throw new RuntimeException("取消订单失败: " + e.getMessage());
+        }
+    }
+}
+package com.movie.service.impl;
+
+import java.util.List;
+
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.stereotype.Service;
+
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.movie.config.RabbitMQConfig;
+import com.movie.dto.LikeMsgDTO;
+import com.movie.entity.ReviewReply;
+import com.movie.mapper.ReviewReplyMapper;
+import com.movie.service.IReviewReplyService;
+import com.movie.vo.ReplyVO;
+
+/**
+ * <p>
+ * 评论回复表 服务实现类
+ * </p>
+ *
+ * @author Liu
+ * @since 2025-12-25
+ */
+@Service
+public class ReviewReplyServiceImpl extends ServiceImpl<ReviewReplyMapper, ReviewReply> implements IReviewReplyService {
+    @Autowired private StringRedisTemplate redisTemplate;
+    @Autowired private RabbitTemplate rabbitTemplate;
+
+    // 点赞回复
+    public void likeReply(Long replyId, Long userId) {
+        String key = "reply:like:" + replyId;
+        Boolean isMember = redisTemplate.opsForSet().isMember(key, userId.toString());
+        boolean isLikeAction;
+
+        if (Boolean.TRUE.equals(isMember)) {
+            redisTemplate.opsForSet().remove(key, userId.toString());
+            isLikeAction = false;
+        } else {
+            redisTemplate.opsForSet().add(key, userId.toString());
+            isLikeAction = true;
+        }
+
+        // 发送完整 DTO
+        LikeMsgDTO msg = new LikeMsgDTO(userId, replyId, 2, isLikeAction); // type=2
+        rabbitTemplate.convertAndSend(RabbitMQConfig.LIKE_COUNT_QUEUE, msg);
+    }
+    
+    @Override
+    public void loadLikeState(List<ReplyVO> list, Long userId) {
+        // 删除这行：if (userId == null) return; 
+        // 即使没登录，也要显示有多少人点赞
+        
+        if (list == null || list.isEmpty()) return;
+
+        for (ReplyVO vo : list) {
+            String key = "reply:like:" + vo.getId();
+            
+            // 1. 先查总数 (Redis 数据是最准的)
+            Long count = redisTemplate.opsForSet().size(key);
+            vo.setLikeCount(count != null ? count.intValue() : 0);
+
+            // 2. 如果用户登录了，再查该用户是否点赞
+            if (userId != null) {
+                // 必须转 String，防止 Long 和 String 比较导致永远 false
+                Boolean isLiked = redisTemplate.opsForSet().isMember(key, userId.toString());
+                vo.setIsLiked(Boolean.TRUE.equals(isLiked));
+            } else {
+                // 没登录肯定没点赞
+                vo.setIsLiked(false);
+            }
+        }
+    }
+
+    @Override
+    public Page<ReplyVO> getReplyPage(Long reviewId, int pageNum, int pageSize) {
+        Page<ReplyVO> page = new Page<>(pageNum, pageSize);
+        // 直接调用 Mapper 的分页方法
+        return baseMapper.findRepliesByReviewId(page, reviewId);
+    }
+}
+package com.movie.service.impl;
+
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.util.List;
+import java.util.Map;
+
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.movie.config.RabbitMQConfig;
+import com.movie.dto.LikeMsgDTO;
+import com.movie.dto.ReviewDTO;
+import com.movie.entity.Info;
+import com.movie.entity.Review;
+import com.movie.entity.ReviewReply;
+import com.movie.entity.User;
+import com.movie.mapper.ReviewMapper;
+import com.movie.service.IMovieService;
+import com.movie.service.IReviewReplyService; // 修正引用
+import com.movie.service.IReviewService;
+import com.movie.utils.UserHolder;
+import com.movie.vo.ReplyVO;
+import com.movie.vo.ReviewVO;
+
+@Service
+public class ReviewServiceImpl extends ServiceImpl<ReviewMapper, Review> implements IReviewService {
+
+    @Autowired private IMovieService infoService;
+    @Autowired private StringRedisTemplate redisTemplate;
+    @Autowired private RabbitTemplate rabbitTemplate;
+    
+    
+    // 建议注入接口，而不是具体的 Impl 类，防止循环依赖
+    @Autowired private IReviewReplyService replyService; 
+
+    // --- 1. 添加评论 (修复 500 错误) ---
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void addReview(ReviewDTO dto, Long userId) {
+        // 1.1 【关键修复】检查是否已经评论过
+        long existCount = this.count(new QueryWrapper<Review>()
+                .eq("user_id", userId)
+                .eq("movie_id", dto.getMovieId()));
+        
+        if (existCount > 0) {
+            // 这里抛出异常，前端会收到 500，但这是业务异常。
+            // 更好的做法是自定义一个 BusinessException 返回 400，但为了你现有架构，
+            // 这里抛出 RuntimeException，你需要在 Controller 或全局异常处理器里看日志。
+            throw new RuntimeException("您已经评价过该电影，无法重复评价！");
+        }
+
+        // 1.2 校验评分范围
+        if (dto.getScore() == null || dto.getScore().doubleValue() < 0 || dto.getScore().doubleValue() > 10) {
+            throw new RuntimeException("评分无效，必须在 0-10 之间");
+        }
+
+        // 1.3 保存评论
+        Review review = new Review();
+        review.setMovieId(dto.getMovieId());
+        review.setUserId(userId);
+        review.setScore(dto.getScore());
+        review.setContent(dto.getContent());
+        review.setLikeCount(0);
+        
+        boolean saveSuccess = this.save(review);
+        if (!saveSuccess) {
+            throw new RuntimeException("评论保存失败");
+        }
+
+        // 1.4 刷新电影分数
+        refreshMovieRating(dto.getMovieId());
+    }
+
+    // --- 2. 删除评论 ---
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void deleteReview(Long id) {
+        Review review = this.getById(id);
+        if (review == null) return;
+        
+        this.removeById(id);
+        
+        QueryWrapper<ReviewReply> replyQuery = new QueryWrapper<>();
+        replyQuery.eq("review_id", id);
+        replyService.remove(replyQuery);
+
+        refreshMovieRating(review.getMovieId());
+    }
+
+    // --- 3. 前台列表 ---
+    @Override
+    public Page<ReviewVO> getReviewsByMovieId(Long movieId, int pageNum, int pageSize) {
+        // 1. 先查出影评
+        Page<ReviewVO> page = new Page<>(pageNum, pageSize);
+        Page<ReviewVO> resultPage = baseMapper.findReviewsByMovieId(page, movieId);
+
+        // 获取当前用户ID (用于检查是否点赞)
+        User currentUser = UserHolder.getUser(); 
+        Long currentUserId = (currentUser != null) ? currentUser.getId() : null;
+
+        // 2. 填充回复数据
+        if (resultPage.getRecords() != null && !resultPage.getRecords().isEmpty()) {
+            for (ReviewVO vo : resultPage.getRecords()) {
+                // 改成 50，一次性查多点，方便前端做"展开"
+                Page<ReplyVO> replyPage = replyService.getReplyPage(vo.getId(), 1, 20);
+                List<ReplyVO> replies = replyPage.getRecords();
+                
+                // 【关键修复】必须在这里加载回复的点赞状态！
+                // 之前就是因为缺了这行，导致回复的点赞数全是数据库旧值(0)，且状态全灰
+                replyService.loadLikeState(replies, currentUserId);
+                
+                vo.setReplyList(replies);
+            }
+        }
+        
+        return resultPage;
+    }
+
+    // --- 4. 后台管理员列表 ---
+    @Override
+    public Page<ReviewVO> getAdminReviewList(int pageNum, int pageSize, String keyword) {
+        Page<ReviewVO> page = new Page<>(pageNum, pageSize);
+        return baseMapper.findAdminReviews(page, keyword);
+    }
+
+    // --- 5. 点赞逻辑 ---
+    @Override
+    public void likeReview(Long reviewId, Long userId) {
+        String key = "review:like:" + reviewId;
+        Boolean isMember = redisTemplate.opsForSet().isMember(key, userId.toString());
+        boolean isLikeAction;
+
+        if (Boolean.TRUE.equals(isMember)) {
+            redisTemplate.opsForSet().remove(key, userId.toString());
+            isLikeAction = false;
+        } else {
+            redisTemplate.opsForSet().add(key, userId.toString());
+            isLikeAction = true;
+        }
+
+        LikeMsgDTO msg = new LikeMsgDTO(userId, reviewId, 1, isLikeAction);
+        rabbitTemplate.convertAndSend(RabbitMQConfig.LIKE_COUNT_QUEUE, msg);
+    }
+
+    // --- 6. 加载点赞状态 ---
+    @Override
+    public void loadLikeState(List<ReviewVO> records, Long currentUserId) {
+        if (records == null || records.isEmpty()) return;
+        for (ReviewVO record : records) {
+            String key = "review:like:" + record.getId();
+            Long likeCount = redisTemplate.opsForSet().size(key);
+            record.setLikeCount(likeCount != null ? likeCount.intValue() : 0);
+
+            if (currentUserId != null) {
+                Boolean isLiked = redisTemplate.opsForSet().isMember(key, currentUserId.toString());
+                record.setIsLiked(Boolean.TRUE.equals(isLiked));
+            } else {
+                record.setIsLiked(false);
+            }
+        }
+    }
+
+    // ================= 核心优化：使用 SQL 聚合计算评分 =================
+    // 你之前的写法查出所有 list 是重大隐患，这里改用 getMap
+    private void refreshMovieRating(Long movieId) {
+        QueryWrapper<Review> query = new QueryWrapper<>();
+        // 直接让数据库计算平均分和总数
+        query.select("IFNULL(AVG(score), 0) as avgScore", "COUNT(*) as totalCount");
+        query.eq("movie_id", movieId);
+        
+        Map<String, Object> result = this.getMap(query);
+        
+        if (result == null) return;
+
+        // 安全转换类型（不同数据库驱动返回类型可能不同，转 string 再转 BigDecimal 最稳）
+        BigDecimal avgScore = new BigDecimal(String.valueOf(result.get("avgScore")));
+        avgScore = avgScore.setScale(1, RoundingMode.HALF_UP);
+        
+        @SuppressWarnings("UnnecessaryTemporaryOnConversionFromString")
+        Integer reviewCount = Integer.parseInt(String.valueOf(result.get("totalCount")));
+
+        // 更新电影表
+        Info movieToUpdate = new Info();
+        movieToUpdate.setId(movieId);
+        movieToUpdate.setRating(avgScore);
+        movieToUpdate.setReviewCount(reviewCount);
+        
+        infoService.updateById(movieToUpdate);
+    }
+}package com.movie.service.impl;
+
+import java.time.LocalDateTime;
+
+import org.springframework.stereotype.Service;
+
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.movie.entity.Schedule;
+import com.movie.mapper.ScheduleMapper;
+import com.movie.service.IScheduleService;
+
+@Service
+public class ScheduleServiceImpl extends ServiceImpl<ScheduleMapper, Schedule> implements IScheduleService {
+    @Override
+    public boolean isTimeConflict(Long hallId, LocalDateTime startTime, LocalDateTime endTime) {
+        QueryWrapper<Schedule> query = new QueryWrapper<>();
+        query.eq("hall_id", hallId)
+            .lt("start_time", endTime) // 已有排片的开始时间 < 新排片的结束时间
+            .gt("end_time", startTime);  // 已有排片的结束时间 > 新排片的开始时间
+
+        return this.count(query) > 0;
+    }
+}package com.movie.service.impl;
+
+import java.math.BigDecimal;
+import java.util.concurrent.TimeUnit;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.movie.dto.UserLoginDTO;
+import com.movie.dto.UserRegisterDTO;
+import com.movie.entity.User;
+import com.movie.entity.UserWallet;
+import com.movie.mapper.UserMapper;
+import com.movie.service.IUserService;
+import com.movie.service.IUserWalletService;
+import com.movie.vo.UserLoginVO;
+
+import cn.hutool.core.bean.BeanUtil;
+import cn.hutool.core.util.IdUtil;
+import cn.hutool.crypto.digest.BCrypt;
+import cn.hutool.json.JSONUtil;
+
+
+/**
+ * UserServiceImpl
+ */
+@Service
+public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IUserService {
+
+    @Autowired
+    private StringRedisTemplate redisTemplate;
+
+    @Autowired
+    private IUserWalletService userWalletService;
+
+    @Override
+    public void register(UserRegisterDTO dto) {
+        // 1. 检查用户名是否已存在
+        QueryWrapper<User> query = new QueryWrapper<>();
+        query.eq("username", dto.getUsername());
+        if (count(query) > 0) {
+            throw new RuntimeException("用户名已存在！");
+        }
+
+        // 2. 检查手机号
+        QueryWrapper<User> phoneQuery = new QueryWrapper<>();
+        phoneQuery.eq("phone", dto.getPhone());
+        if (count(phoneQuery) > 0) {
+            throw new RuntimeException("手机号已被注册！");
+        }
+
+        // 3. 创建用户对象
+        User user = new User();
+        user.setUsername(dto.getUsername());
+        user.setNickname(dto.getNickname());
+        user.setPhone(dto.getPhone());
+        
+        user.setStatus(true);     
+        user.setIsAdmin(false); 
+        
+        // 4. 密码加密 (BCrypt)
+        // 注意：如果这里报错，说明你没引 Hutool 包，或者 User 表没 password 字段
+        String encodedPassword = BCrypt.hashpw(dto.getPassword());
+        user.setPassword(encodedPassword);
+
+        // 5. 保存
+        save(user);
+
+        UserWallet wallet = new UserWallet();
+        wallet.setUserId(user.getId());
+        wallet.setBalance(BigDecimal.ZERO);
+        wallet.setPayPassword(null);
+        userWalletService.save(wallet);
+    }
+
+    @Override
+    public UserLoginVO login(UserLoginDTO dto) {
+        // 1. 根据用户名查询用户
+        QueryWrapper<User> query = new QueryWrapper<>();
+        query.eq("username", dto.getUsername());
+        User user = getOne(query);
+
+        // 2. 校验用户是否存在
+        if (user == null) {
+            throw new RuntimeException("用户不存在");
+        }
+
+        if (Boolean.FALSE.equals(user.getStatus())) {
+            throw new RuntimeException("该账号已被禁用，请联系管理员");
+        }
+
+        // 3. 校验密码 (必须用 BCrypt.checkpw)
+        if (!BCrypt.checkpw(dto.getPassword(), user.getPassword())) {
+            throw new RuntimeException("密码错误");
+        }
+        
+        // 4. 生成 Token (用 UUID)
+        String token = IdUtil.simpleUUID();
+        String role = Boolean.TRUE.equals(user.getIsAdmin()) ? "admin" : "user";
+        // 5. 把用户信息存入 Redis (Key: "login_token:xxxx", Value: UserJson, TTL: 24h)
+        // 为什么存 Redis？因为这样后端就是无状态的，且查询极快
+        String key = "login_token:" + token;
+        // 把 User 对象转成 JSON 字符串
+        String userJson = JSONUtil.toJsonStr(user);
+        
+        redisTemplate.opsForValue().set(key, userJson, 24, TimeUnit.HOURS);
+
+        // 6. 组装返回给前端的数据
+        UserLoginVO vo = new UserLoginVO();
+        BeanUtil.copyProperties(user, vo); // 属性拷贝
+        vo.setToken(token); // 塞入 Token
+        vo.setRole(role);
+
+        return vo;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void updateUserInfo(User user, String token) {
+        // 1. 强制只允许修改特定字段 (安全过滤)
+        // 防止用户恶意修改 id, username, balance, is_admin 等敏感字段
+        User updateUser = new User();
+        updateUser.setId(user.getId()); // ID 是必须的，用于 WHERE 条件
+        
+        // 只拷贝允许修改的字段
+        updateUser.setNickname(user.getNickname());
+        updateUser.setPhone(user.getPhone());
+        updateUser.setEmail(user.getEmail());
+        updateUser.setAvatarUrl(user.getAvatarUrl());
+        
+        // 2. 更新数据库
+        this.updateById(updateUser);
+
+        // 3. 【核心】同步更新 Redis
+        // 因为拦截器是根据 token 去 Redis 拿用户的，如果 Redis 不更，拦截器拿到的永远是旧数据
+        String key = "login_token:" + token;
+        
+        // 为了数据完整性，建议重新从数据库查一份最新的完整数据
+        User latestUser = this.getById(user.getId());
+        
+        // 转 JSON
+        String userJson = JSONUtil.toJsonStr(latestUser);
+        
+        // 更新 Redis，并重置过期时间 (例如 24小时)
+        redisTemplate.opsForValue().set(key, userJson, 24, TimeUnit.HOURS);
+    }
+}package com.movie.service.impl;
+
+import java.math.BigDecimal;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.movie.dto.ChangePayPwdDTO;
+import com.movie.entity.UserWallet;
+import com.movie.entity.WalletLog;
+import com.movie.mapper.UserWalletMapper;
+import com.movie.service.IUserWalletService;
+import com.movie.service.IWalletLogService;
+
+import cn.hutool.crypto.digest.BCrypt;
+
+/**
+ * <p>
+ * 用户钱包表 服务实现类
+ * </p>
+ *
+ * @author Liu
+ * @since 2025-12-25
+ */
+@Service
+public class UserWalletServiceImpl extends ServiceImpl<UserWalletMapper, UserWallet> implements IUserWalletService {
+    
+    @Autowired
+    private IWalletLogService walletLogService;
+    
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void setPayPassword(Long userId, String password) {
+        // 1. 查询钱包
+        QueryWrapper<UserWallet> query = new QueryWrapper<>();
+        query.eq("user_id", userId);
+        UserWallet wallet = this.getOne(query);
+
+        if (wallet == null) {
+            throw new RuntimeException("钱包不存在");
+        }
+
+        // 2. 校验密码强度 (企业级做法：必须是6位数字)
+        if (!password.matches("^\\d{6}$")) {
+            throw new RuntimeException("支付密码必须是6位数字");
+        }
+
+        // 3. 加密并保存
+        String encodedPwd = BCrypt.hashpw(password);
+        wallet.setPayPassword(encodedPwd);
+        
+        this.updateById(wallet);
+    }
+
+    @Override
+    public void changePayPassword(Long userId, ChangePayPwdDTO dto) {
+        UserWallet wallet = this.getOne(new QueryWrapper<UserWallet>().eq("user_id", userId));
+        if (wallet == null) throw new RuntimeException("钱包不存在");
+        
+        // 1. 校验旧密码
+        if (wallet.getPayPassword() != null) {
+            if (!BCrypt.checkpw(dto.getOldPassword(), wallet.getPayPassword())) {
+                throw new RuntimeException("旧支付密码错误");
+            }
+        }
+        
+        // 2. 校验新密码格式
+        if (!dto.getNewPassword().matches("^\\d{6}$")) {
+            throw new RuntimeException("新密码必须是6位数字");
+        }
+
+        // 3. 更新
+        wallet.setPayPassword(BCrypt.hashpw(dto.getNewPassword()));
+        this.updateById(wallet);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void recharge(Long userId, BigDecimal amount) {
+        // 1. 基础校验
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new RuntimeException("充值金额必须大于0");
+        }
+        if (amount.compareTo(new BigDecimal("100000")) > 0) {
+            throw new RuntimeException("单次充值不能超过 10万"); // 风控限制
+        }
+
+        // 2. 查询钱包
+        UserWallet wallet = this.getOne(new QueryWrapper<UserWallet>().eq("user_id", userId));
+        if (wallet == null) {
+            throw new RuntimeException("钱包不存在");
+        }
+
+        // 3. 增加余额
+        wallet.setBalance(wallet.getBalance().add(amount));
+        boolean updateSuccess = this.updateById(wallet);
+        if (!updateSuccess) {
+            throw new RuntimeException("充值失败");
+        }
+
+        // 4. 记录流水 (Type = 1: 充值)
+        WalletLog walletLog = new WalletLog();
+        walletLog.setUserId(userId);
+        walletLog.setAmount(amount); // 正数
+        walletLog.setType((byte) 1); // 1-充值
+        
+        // 生成一个充值流水号，避免和其他订单号混淆
+        walletLog.setOrderNo("RECH" + System.currentTimeMillis()); 
+        walletLog.setRemark("余额充值");
+        
+        walletLogService.save(walletLog);
+    }
+}

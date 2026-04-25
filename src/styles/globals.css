@@ -1,0 +1,190 @@
+@import "tailwindcss";
+
+:root {
+  --background: #fbfbfb;
+  --foreground: #18181b;
+  --glass-bg-start: rgba(255, 255, 255, 0.8);
+  --glass-bg-end: rgba(255, 255, 255, 0.5);
+  --glass-border: rgba(255, 255, 255, 0.74);
+  --glass-border-soft: rgba(255, 255, 255, 0.58);
+  --glass-shadow:
+    0 18px 38px rgba(15, 23, 42, 0.1),
+    0 4px 12px rgba(15, 23, 42, 0.07);
+  --glass-inner:
+    inset 0 1px 0 rgba(255, 255, 255, 0.88),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.28);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background:
+    radial-gradient(circle at 10% -10%, #ffffff 0%, transparent 46%),
+    radial-gradient(circle at 90% -14%, #f7f7f7 0%, transparent 42%),
+    var(--background);
+  color: var(--foreground);
+  overflow-x: hidden;
+  overflow-x: clip;
+}
+
+html {
+  scroll-behavior: smooth;
+  scrollbar-gutter: stable;
+}
+
+::selection {
+  background: #111827;
+  color: #ffffff;
+}
+
+.glass-panel {
+  position: relative;
+  border-color: var(--glass-border) !important;
+  background: linear-gradient(156deg, var(--glass-bg-start), var(--glass-bg-end)) !important;
+  box-shadow: var(--glass-inner), var(--glass-shadow);
+  backdrop-filter: blur(16px) saturate(132%);
+  -webkit-backdrop-filter: blur(16px) saturate(132%);
+}
+
+.glass-panel::after {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  pointer-events: none;
+  border-radius: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+}
+
+.glass-chip {
+  position: relative;
+  border-color: var(--glass-border-soft) !important;
+  background: linear-gradient(156deg, rgba(255, 255, 255, 0.84), rgba(255, 255, 255, 0.56)) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 3px 8px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(10px) saturate(125%);
+  -webkit-backdrop-filter: blur(10px) saturate(125%);
+}
+
+.glass-button {
+  border-color: var(--glass-border-soft);
+  background: linear-gradient(156deg, rgba(255, 255, 255, 0.86), rgba(255, 255, 255, 0.58));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 6px 16px rgba(15, 23, 42, 0.1);
+  backdrop-filter: blur(12px) saturate(128%);
+  -webkit-backdrop-filter: blur(12px) saturate(128%);
+}
+
+.glass-button:hover {
+  border-color: rgba(24, 24, 27, 0.92);
+  background: linear-gradient(156deg, rgba(24, 24, 27, 0.94), rgba(24, 24, 27, 0.82));
+  color: #ffffff;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 10px 20px rgba(15, 23, 42, 0.24);
+}
+
+.glass-button-solid {
+  border-color: rgba(24, 24, 27, 0.2);
+  background: linear-gradient(156deg, rgba(35, 35, 40, 0.86), rgba(35, 35, 40, 0.62));
+  color: #ffffff;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 8px 18px rgba(15, 23, 42, 0.25);
+}
+
+.glass-button-solid:hover {
+  border-color: rgba(255, 255, 255, 0.9);
+  background: linear-gradient(156deg, rgba(255, 255, 255, 0.98), rgba(255, 255, 255, 0.84));
+  color: #18181b;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.94),
+    0 10px 20px rgba(15, 23, 42, 0.14);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  .keyword-track {
+    animation: none !important;
+    transform: translate3d(-10%, 0, 0);
+  }
+}
+
+.keyword-board {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.keyword-board__tilt {
+  position: absolute;
+  inset: -34% -30%;
+  transform: rotate(-7deg);
+  transform-origin: center;
+}
+
+.keyword-row {
+  position: absolute;
+  left: -28%;
+  width: 156%;
+  overflow: hidden;
+}
+
+.keyword-track {
+  display: flex;
+  gap: 0;
+  width: max-content;
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
+  backface-visibility: hidden;
+}
+
+.keyword-track span {
+  white-space: nowrap;
+  padding-right: 2.1rem;
+  font-size: clamp(3.6rem, 11vw, 12.4rem);
+  line-height: 0.84;
+  letter-spacing: 0.08em;
+  font-weight: 400;
+  color: rgba(24, 24, 27, 0.072);
+  text-transform: uppercase;
+}
+
+.keyword-track--left {
+  animation: keyword-marquee-left linear infinite;
+}
+
+.keyword-track--right {
+  animation: keyword-marquee-right linear infinite;
+}
+
+@keyframes keyword-marquee-left {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+
+  to {
+    transform: translate3d(-33.3333%, 0, 0);
+  }
+}
+
+@keyframes keyword-marquee-right {
+  from {
+    transform: translate3d(-33.3333%, 0, 0);
+  }
+
+  to {
+    transform: translate3d(0%, 0, 0);
+  }
+}

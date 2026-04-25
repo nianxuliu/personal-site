@@ -1,0 +1,929 @@
+package com.movie.websocket;
+
+import java.io.IOException;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.springframework.stereotype.Component;
+
+import jakarta.websocket.OnClose;
+import jakarta.websocket.OnMessage;
+import jakarta.websocket.OnOpen;
+import jakarta.websocket.Session;
+import jakarta.websocket.server.PathParam;
+import jakarta.websocket.server.ServerEndpoint;
+
+/**
+ * WebSocket 服务端
+ * 前端连接地址: ws://localhost:8080/ws/{userId}
+ */
+@Component
+@ServerEndpoint("/ws/{userId}")
+public class WebSocketServer {
+
+    // 静态变量，用来记录当前在线连接数。应该把它设计成线程安全的。
+    private static ConcurrentHashMap<String, Session> sessionMap = new ConcurrentHashMap<>();
+
+    public static ConcurrentHashMap<String, Session> getSessionMap() {
+        return sessionMap;
+    }
+
+    public static void setSessionMap(ConcurrentHashMap<String, Session> sessionMap) {
+        WebSocketServer.sessionMap = sessionMap;
+    }
+
+    /**
+     * 连接建立成功调用的方法
+     */
+    @OnOpen
+    public void onOpen(Session session, @PathParam("userId") String userId) {
+        sessionMap.put(userId, session);
+        System.out.println("用户上线:" + userId + ", 当前在线人数:" + sessionMap.size());
+    }
+
+    /**
+     * 连接关闭调用的方法
+     */
+    @OnClose
+    public void onClose(@PathParam("userId") String userId) {
+        sessionMap.remove(userId);
+        System.out.println("用户下线:" + userId + ", 当前在线人数:" + sessionMap.size());
+    }
+
+    /**
+     * 收到客户端消息后调用的方法 (可选)
+     */
+    @OnMessage
+    public void onMessage(String message, Session session) {
+        System.out.println("收到消息:" + message);
+    }
+
+    /**
+     * 自定义发送消息方法 (服务器 -> 客户端)
+     */
+    @SuppressWarnings("CallToPrintStackTrace")
+    public static void sendInfo(String userId, String message) {
+        Session session = sessionMap.get(userId);
+        if (session != null && session.isOpen()) {
+            try {
+                session.getBasicRemote().sendText(message);
+                System.out.println("推送消息给用户 " + userId + " : " + message);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        } else {
+            System.out.println("用户 " + userId + " 不在线，消息未发送");
+        }
+    }
+
+    /**
+     * 群发消息
+     */
+    @SuppressWarnings("CallToPrintStackTrace")
+    public static void sendAll(String message) {
+        for (Session session : sessionMap.values()) {
+            if (session.isOpen()) {
+                try {
+                    session.getBasicRemote().sendText(message);
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+        System.out.println("群发消息完成: " + message);
+    }
+}
+package com.movie.utils;
+
+import com.movie.entity.User;
+
+public class UserHolder {
+    private static final ThreadLocal<User> tl = new ThreadLocal<>();
+
+    public static void saveUser(User user){
+        tl.set(user);
+    }
+
+    public static User getUser(){
+        return tl.get();
+    }
+
+    public static void removeUser(){
+        tl.remove();
+    }
+}package com.movie.task;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
+import com.movie.mapper.OrderMapper;
+
+@Component
+public class OrderTask {
+
+    @Autowired
+    private OrderMapper orderMapper;
+
+    /**
+     * 每分钟执行一次 (Cron表达式: 秒 分 时 日 月 周)
+     * 检查是否有电影已经放完了，如果有，把订单改成已观影
+     */
+    @Scheduled(cron = "0 0/1 * * * ?")
+    public void processWatchedOrders() {
+        // System.out.println("执行定时任务：更新已观影状态 - " + LocalDateTime.now());
+        orderMapper.updateWatchedStatus();
+    }
+}package com.movie.repository;
+
+import org.springframework.data.elasticsearch.repository.ElasticsearchRepository;
+
+import com.movie.doc.MovieDoc;
+
+public interface MovieRepository extends ElasticsearchRepository<MovieDoc, Long> {
+    // Spring Data Elasticsearch 会自动帮我们实现 CRUD 方法
+}package com.movie.mapper;
+
+
+import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
+
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.movie.entity.ReviewReply;
+import com.movie.vo.ReplyVO;
+
+public interface ReviewReplyMapper extends BaseMapper<ReviewReply> {
+
+    // 查询某条评论下的所有回复 (连表查用户)
+    @Select("SELECT r.*, u.nickname, u.avatar_url, tu.nickname as target_nickname " +
+            "FROM review_reply r " +
+            "LEFT JOIN sys_user u ON r.user_id = u.id " +
+            "LEFT JOIN sys_user tu ON r.target_user_id = tu.id " +
+            "WHERE r.review_id = #{reviewId} AND r.is_deleted = 0 " +
+            "ORDER BY r.create_time ASC")
+    Page<ReplyVO> findRepliesByReviewId(Page<ReplyVO> page, @Param("reviewId") Long reviewId);
+}package com.movie.mapper;
+
+import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
+
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.movie.entity.Review;
+import com.movie.vo.ReviewVO;
+
+public interface ReviewMapper extends BaseMapper<Review> {
+
+    // 自定义分页连表查询
+    @Select("SELECT r.*, u.nickname, u.avatar_url " +
+            "FROM movie_review r " +
+            "LEFT JOIN sys_user u ON r.user_id = u.id " +
+            "WHERE r.movie_id = #{movieId} AND r.is_deleted = 0 " +
+            "ORDER BY r.create_time DESC")
+    Page<ReviewVO> findReviewsByMovieId(Page<ReviewVO> page, @Param("movieId") Long movieId);
+
+    // 使用 <script> 标签支持动态 SQL，如果 keyword 不为空，则搜索 content 或 nickname
+    @Select("<script>" +
+            "SELECT r.*, u.nickname, u.avatar_url, m.title as movie_title " +
+            "FROM movie_review r " +
+            "LEFT JOIN sys_user u ON r.user_id = u.id " +
+            "LEFT JOIN movie_info m ON r.movie_id = m.id " +
+            "WHERE r.is_deleted = 0 " +
+            "<if test='keyword != null and keyword != \"\"'> " +
+            "  AND (r.content LIKE CONCAT('%', #{keyword}, '%') OR u.nickname LIKE CONCAT('%', #{keyword}, '%')) " +
+            "</if>" +
+            "ORDER BY r.create_time DESC" +
+            "</script>")
+    Page<ReviewVO> findAdminReviews(Page<ReviewVO> page, @Param("keyword") String keyword);
+
+    @Update("UPDATE movie_review SET like_count = like_count + 1 WHERE id = #{id}")
+    void increaseLikeCount(Long id);
+
+    @Update("UPDATE movie_review SET like_count = like_count - 1 WHERE id = #{id} AND like_count > 0")
+    void decreaseLikeCount(Long id);
+}package com.movie.mapper;
+
+import java.math.BigDecimal;
+
+import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
+
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.movie.entity.Order;
+
+/**
+ * <p>
+ * 购票订单表 Mapper 接口
+ * </p>
+ *
+ * @author Liu
+ * @since 2025-12-25
+ */
+public interface OrderMapper extends BaseMapper<Order> {
+    // 统计总票房 (只算已支付 status=1 的)
+    @Select("SELECT IFNULL(SUM(total_price), 0) FROM movie_order WHERE status = 1")
+    BigDecimal sumTotalBoxOffice();
+
+    // 统计今日票房 (只算已支付 + 支付时间是今天)
+    @Select("SELECT IFNULL(SUM(total_price), 0) FROM movie_order WHERE status = 1 AND DATE(pay_time) = CURDATE()")
+    BigDecimal sumTodayBoxOffice();
+
+    // 定时任务专用：把所有 "已支付(1)" 且 "结束时间小于当前时间" 的订单，改为 "已观影(4)"
+    // 这里用了连表更新 (UPDATE JOIN)
+    @Update("UPDATE movie_order o " +
+            "INNER JOIN movie_schedule s ON o.schedule_id = s.id " +
+            "SET o.status = 4 " +
+            "WHERE o.status = 1 AND s.end_time < NOW()")
+    void updateWatchedStatus();
+}
+package com.movie.listener;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.stereotype.Component;
+
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.movie.config.RabbitMQConfig;
+import com.movie.entity.Order;
+import com.movie.service.IOrderService;
+
+@Component
+public class OrderTimeoutListener {
+    @Autowired
+    private IOrderService orderService;
+    @Autowired
+    private StringRedisTemplate redisTemplate;
+
+    // 监听死信队列
+    @RabbitListener(queues = RabbitMQConfig.ORDER_RELEASE_QUEUE)
+    public void listenOrderTimeout(String orderNo) {
+        if (orderNo == null) return;
+        
+        // 1. 根据订单号查询订单
+        QueryWrapper<Order> query = new QueryWrapper<>();
+        query.eq("order_no", orderNo);
+        Order order = orderService.getOne(query);
+
+        if (order == null) return;
+
+        // 2. 检查订单状态是否仍为“待支付”
+        if (order.getStatus() == 0) {
+            // 3. 状态仍为 0，说明超时未支付，关闭订单
+            order.setStatus(2); // 2-已取消
+            orderService.updateById(order);
+
+            // 4. 释放 Redis 中的座位锁
+            String lockKeyPrefix = "lock:seat:" + order.getScheduleId() + ":";
+            List<String> seats = List.of(order.getSeatInfo().split(","));
+            List<String> lockKeys = seats.stream().map(seat -> lockKeyPrefix + seat).collect(Collectors.toList());
+            redisTemplate.delete(lockKeys);
+        }
+    }
+}package com.movie.listener;
+
+import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.stereotype.Component;
+
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.movie.config.RabbitMQConfig;
+import com.movie.dto.LikeMsgDTO;
+import com.movie.entity.Review;
+import com.movie.entity.ReviewReply;
+import com.movie.entity.UserLikeRecord;
+import com.movie.service.IReviewReplyService;
+import com.movie.service.IReviewService;
+import com.movie.service.IUserLikeRecordService;
+
+@Component
+public class LikeCountListener {
+
+    @Autowired private StringRedisTemplate redisTemplate;
+    @Autowired private IReviewService reviewService;
+    @Autowired private IReviewReplyService replyService;
+    @Autowired private IUserLikeRecordService userLikeRecordService; // 记得创建这个Service
+
+    @RabbitListener(queues = RabbitMQConfig.LIKE_COUNT_QUEUE)
+    public void handleLikeMessage(LikeMsgDTO msg) {
+        if (msg == null) return;
+
+        // 1. 维护 MySQL 的点赞记录表 (持久化)
+        if (msg.getIsLike()) {
+            // 插入记录 (如果已存在可能会报错，建议加 try-catch 或 ignore)
+            try {
+                UserLikeRecord record = new UserLikeRecord();
+                record.setUserId(msg.getUserId());
+                record.setTargetId(msg.getTargetId());
+                record.setType(msg.getType()); // 1或2
+                userLikeRecordService.save(record);
+            } catch (Exception e) {
+            }
+        } else {
+            // 删除记录
+            QueryWrapper<UserLikeRecord> query = new QueryWrapper<>();
+            query.eq("user_id", msg.getUserId())
+                .eq("target_id", msg.getTargetId())
+                .eq("type", msg.getType());
+            userLikeRecordService.remove(query);
+        }
+
+        // 2. 更新 Redis 里的总数 -> 同步到 MySQL 计数列
+        String redisKey = (msg.getType() == 1 ? "review:like:" : "reply:like:") + msg.getTargetId();
+        Long size = redisTemplate.opsForSet().size(redisKey);
+        int count = size != null ? size.intValue() : 0;
+
+        if (msg.getType() == 1) {
+            // 更新影评表
+            Review review = new Review();
+            review.setId(msg.getTargetId());
+            review.setLikeCount(count);
+            reviewService.updateById(review);
+        } else {
+            // 更新回复表
+            ReviewReply reply = new ReviewReply();
+            reply.setId(msg.getTargetId());
+            reply.setLikeCount(count);
+            replyService.updateById(reply);
+        }
+    }
+}package com.movie.interceptor;
+
+import java.util.concurrent.TimeUnit;
+
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.web.servlet.HandlerInterceptor;
+
+import com.movie.entity.User;
+import com.movie.utils.UserHolder;
+
+import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSONUtil;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+
+public class LoginInterceptor implements HandlerInterceptor {
+
+    @SuppressWarnings("FieldMayBeFinal")
+    private StringRedisTemplate stringRedisTemplate;
+
+    public LoginInterceptor(StringRedisTemplate stringRedisTemplate) {
+        this.stringRedisTemplate = stringRedisTemplate;
+    }
+
+    @Override
+    public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
+        // 1. 获取请求头中的 token
+        String token = request.getHeader("authorization");
+        if (StrUtil.isBlank(token)) {
+            response.setStatus(401); // 401 Unauthorized
+            return false;
+        }
+
+        // 2. 基于 token 获取 redis 中的用户
+        String key  = "login_token:" + token;
+        String userJson = stringRedisTemplate.opsForValue().get(key);
+        if (StrUtil.isBlank(userJson)) {
+            response.setStatus(401);
+            return false;
+        }
+
+        // 3. 将查询到的 Hash 数据转为 User 对象
+        User user = JSONUtil.toBean(userJson, User.class);
+
+        // 4. 保存用户信息到 ThreadLocal
+        UserHolder.saveUser(user);
+
+        // 5. 刷新 token 有效期（用户只要在操作，token 就应该续期）
+        stringRedisTemplate.expire(key, 24, TimeUnit.HOURS);
+        
+        // 6. 放行
+        return true;
+    }
+
+    @Override
+    public void afterCompletion(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) throws Exception {
+        // 请求结束后，移除用户，防止内存泄漏
+        UserHolder.removeUser();
+    }
+}package com.movie.interceptor;
+
+import org.springframework.web.servlet.HandlerInterceptor;
+
+import com.movie.entity.User;
+import com.movie.utils.UserHolder;
+
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+
+public class AdminAuthInterceptor implements HandlerInterceptor {
+
+    @Override
+    public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
+        // 1. 从 ThreadLocal 获取用户信息 (LoginInterceptor 已经塞进去了)
+        User user = UserHolder.getUser();
+
+        // 2. 检查用户是否存在，以及是否是管理员
+        if (user == null || Boolean.FALSE.equals(user.getIsAdmin())) {
+            response.setStatus(403); // 403 Forbidden - 你有身份，但没权限
+            return false;
+        }
+
+        // 3. 是管理员，放行
+        return true;
+    }
+}package com.movie.doc;
+
+import java.util.List;
+
+import org.springframework.data.annotation.Id;
+import org.springframework.data.elasticsearch.annotations.Document;
+import org.springframework.data.elasticsearch.annotations.Field;
+import org.springframework.data.elasticsearch.annotations.FieldType;
+
+@Document(indexName = "movie_index") // 定义 ES 索引名
+public class MovieDoc {
+    @Id
+    private Long id; // 对应 movie_info 表的 ID
+
+    // ik_max_word 是中文分词器，ik_smart 是更智能的
+    // analyzer 是写入时分词，searchAnalyzer 是搜索时分词
+    @Field(type = FieldType.Text, analyzer = "ik_max_word", searchAnalyzer = "ik_smart")
+    private String title;
+
+    @Field(type = FieldType.Text, analyzer = "ik_max_word", searchAnalyzer = "ik_smart")
+    private String originalTitle;
+
+    @Field(type = FieldType.Keyword) // Keyword 不分词，精确匹配
+    private String genre;
+
+    @Field(type = FieldType.Keyword)
+    private String country;
+
+    @Field(type = FieldType.Text, analyzer = "ik_max_word", searchAnalyzer = "ik_smart")
+    private String synopsis;
+
+    @Field(type = FieldType.Keyword)
+    private String posterUrl; // 海报地址
+
+    @Field(type = FieldType.Double)
+    private Double rating;    // 评分
+
+    @Field(type = FieldType.Keyword)
+    private String releaseDate; // 上映日期（存字符串即可，方便展示）
+    
+    // --- 关键：把关联信息也存进来 ---
+    @Field(type = FieldType.Text, analyzer = "ik_max_word", searchAnalyzer = "ik_smart")
+    private List<String> actors; // 演员名列表 ["成龙", "吴彦祖"]
+
+    @Field(type = FieldType.Text, analyzer = "ik_max_word", searchAnalyzer = "ik_smart")
+    private List<String> directors; // 导演名列表
+
+    // --- 请手动生成 Getter / Setter ---
+    public Long getId() { return id; }
+    public void setId(Long id) { this.id = id; }
+    public String getTitle() { return title; }
+    public void setTitle(String title) { this.title = title; }
+    public String getOriginalTitle() { return originalTitle; }
+    public void setOriginalTitle(String originalTitle) { this.originalTitle = originalTitle; }
+    public String getGenre() { return genre; }
+    public void setGenre(String genre) { this.genre = genre; }
+    public String getCountry() { return country; }
+    public void setCountry(String country) { this.country = country; }
+    public String getSynopsis() { return synopsis; }
+    public void setSynopsis(String synopsis) { this.synopsis = synopsis; }
+    public List<String> getActors() { return actors; }
+    public void setActors(List<String> actors) { this.actors = actors; }
+    public List<String> getDirectors() { return directors; }
+    public void setDirectors(List<String> directors) { this.directors = directors; }
+
+    public String getPosterUrl() {
+        return posterUrl;
+    }
+
+    public void setPosterUrl(String posterUrl) {
+        this.posterUrl = posterUrl;
+    }
+
+    public Double getRating() {
+        return rating;
+    }
+
+    public void setRating(Double rating) {
+        this.rating = rating;
+    }
+
+    public String getReleaseDate() {
+        return releaseDate;
+    }
+
+    public void setReleaseDate(String releaseDate) {
+        this.releaseDate = releaseDate;
+    }
+}package com.movie.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.socket.server.standard.ServerEndpointExporter;
+
+@Configuration
+public class WebSocketConfig {
+    /**
+     * 注入 ServerEndpointExporter，
+     * 这个 bean 会自动注册使用了 @ServerEndpoint 注解声明的 Websocket endpoint
+     */
+    @Bean
+    public ServerEndpointExporter serverEndpointExporter() {
+        return new ServerEndpointExporter();
+    }
+}package com.movie.config;
+
+import org.springframework.amqp.core.Binding;
+import org.springframework.amqp.core.BindingBuilder;
+import org.springframework.amqp.core.DirectExchange;
+import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.core.QueueBuilder;
+import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
+import org.springframework.amqp.support.converter.MessageConverter;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class RabbitMQConfig {
+
+    // --- 点赞队列 (不变) ---
+    public static final String LIKE_COUNT_QUEUE = "like.count.queue.v2";
+    @Bean
+    public Queue likeCountQueue() {
+        return new Queue(LIKE_COUNT_QUEUE, true);
+    }
+    
+    // --- 新增：订单超时处理 ---
+    public static final String ORDER_TTL_QUEUE = "order.delay.queue"; // 延迟队列
+    public static final String ORDER_DLX_EXCHANGE = "order.dlx.exchange"; // 死信交换机
+    public static final String ORDER_RELEASE_QUEUE = "order.release.queue"; // 死信接收队列
+    public static final String ORDER_DLX_ROUTING_KEY = "order.release.key"; // 死信路由键
+
+    // 1. 定义死信交换机
+    @Bean
+    public DirectExchange orderDlxExchange() {
+        return new DirectExchange(ORDER_DLX_EXCHANGE);
+    }
+    
+    // 2. 定义延迟队列 (消息过期后会进入死信交换机)
+    @Bean
+
+    public Queue orderTtlQueue() {
+        return QueueBuilder.durable(ORDER_TTL_QUEUE)
+                .ttl(900000) // 15分钟 TTL (15 * 60 * 1000)
+                .deadLetterExchange(ORDER_DLX_EXCHANGE) // 绑定死信交换机
+                .deadLetterRoutingKey(ORDER_DLX_ROUTING_KEY) // 绑定死信路由键
+                .build();
+    }
+    
+    // 3. 定义死信队列 (真正消费消息的队列)
+    @Bean
+    public Queue orderReleaseQueue() {
+        return new Queue(ORDER_RELEASE_QUEUE, true);
+    }
+    
+    // 4. 绑定死信队列和死信交换机
+    @Bean
+    public Binding orderDlxBinding() {
+        return BindingBuilder.bind(orderReleaseQueue()).to(orderDlxExchange()).with(ORDER_DLX_ROUTING_KEY);
+    }
+
+    @Bean
+    public MessageConverter messageConverter() {
+        return new Jackson2JsonMessageConverter();
+    }
+}package com.movie.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+import com.baomidou.mybatisplus.annotation.DbType;
+import com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor;
+import com.baomidou.mybatisplus.extension.plugins.inner.PaginationInnerInterceptor;
+
+@Configuration
+public class MybatisPlusConfig {
+    @Bean
+    public MybatisPlusInterceptor mybatisPlusInterceptor() {
+        MybatisPlusInterceptor interceptor = new MybatisPlusInterceptor();
+        // 核心：如果不加这个拦截器，所有的 Page 对象都会失效，直接查全表
+        interceptor.addInnerInterceptor(new PaginationInnerInterceptor(DbType.MYSQL));
+        return interceptor;
+    }
+}package com.movie.config;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+
+import com.movie.interceptor.AdminAuthInterceptor;
+import com.movie.interceptor.LoginInterceptor;
+
+@Configuration
+public class MvcConfig implements WebMvcConfigurer {
+
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
+
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        // 注册登录拦截器
+        registry.addInterceptor(new LoginInterceptor(stringRedisTemplate))
+                .addPathPatterns("/**") // 拦截所有
+                .excludePathPatterns(   // --- 排除所有公开路径 ---
+                        // 用户认证
+                        "/user/login",
+                        "/user/register",
+                        // 文件上传
+                        "/file/upload",
+                        // 公开内容查询
+                        "/movie/search",     // ES 搜索
+                        "/movie/top10",      // 热门电影
+                        "/movie/detail/**",  // 电影详情
+                        "/actorInfo/list",       // 演员列表
+                        "/actorInfo/{id}",       // 演员详情
+                        "/directorInfo/list",    // 导演列表
+                        "/directorInfo/{id}",    // 导演详情
+                        "/schedule/list/**", // 某电影的排片
+                        "/review/list/**",   // 某电影的评论
+                        "/reply/list/**",
+                        "/cinema/list",
+                        "/hall/list/**"     // 某评论的回复
+                ).order(1);
+
+        registry.addInterceptor(new AdminAuthInterceptor())
+                .addPathPatterns(
+                    // --- 把所有管理员接口都加到这里 ---
+                    "/movie/add", "/movie/update", "/movie/delete/**",
+                    "/actor/**", "/director/**", 
+                    "/cinema/**", "/hall/**", "/schedule/**",
+                    "/report/**", "/log/**",
+                    "/review/delete/**", "/review/admin/**",
+                    "/user/status/**",
+                    "/reply/delete/**"
+                )
+                .excludePathPatterns(
+            "/schedule/list/**",
+                        "/cinema/list/**" ,// 允许普通用户访问排片列表，不触发管理员检查
+                        "/hall/list/**"  // 允许普通用户访问影厅列表，不触发管理员检查
+                )
+                .order(2);  
+    }
+}package com.movie.config;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+import io.minio.MinioClient;
+
+/**
+ * MinIO 配置类
+ * 作用：读取 application.yml 中的 minio 配置，并注册 MinioClient 到 Spring 容器
+ */
+@Configuration
+@ConfigurationProperties(prefix = "minio") // 告诉 Spring 读取 minio 开头的配置
+public class MinioConfig {
+
+    private String endpoint;
+    private String accessKey;
+    private String secretKey;
+    private String bucketName;
+
+    /**
+     * 注入 MinioClient 客户端
+     * 以后在代码里直接 @Autowired MinioClient minioClient 就能用了
+     */
+    @Bean
+    public MinioClient minioClient() {
+        return MinioClient.builder()
+                .endpoint(endpoint)
+                .credentials(accessKey, secretKey)
+                .build();
+    }
+
+    public String getEndpoint() {
+        return endpoint;
+    }
+
+    public void setEndpoint(String endpoint) {
+        this.endpoint = endpoint;
+    }
+
+    public String getAccessKey() {
+        return accessKey;
+    }
+
+    public void setAccessKey(String accessKey) {
+        this.accessKey = accessKey;
+    }
+
+    public String getSecretKey() {
+        return secretKey;
+    }
+
+    public void setSecretKey(String secretKey) {
+        this.secretKey = secretKey;
+    }
+
+    public String getBucketName() {
+        return bucketName;
+    }
+
+    public void setBucketName(String bucketName) {
+        this.bucketName = bucketName;
+    }
+}package com.movie.common;
+
+public class Result<T> {
+    private Integer code; // 200成功，500失败
+    private String message;
+    private T data;
+
+    public static <T> Result<T> success(T data) {
+        Result<T> r = new Result<>();
+        r.code = 200;
+        r.message = "success";
+        r.data = data;
+        return r;
+    }
+
+    public static <T> Result<T> error(String msg) {
+        Result<T> r = new Result<>();
+        r.code = 500;
+        r.message = msg;
+        return r;
+    }
+
+    public Integer getCode() {
+        return code;
+    }
+
+    public void setCode(Integer code) {
+        this.code = code;
+    }
+
+    public String getMessage() {
+        return message;
+    }
+
+    public void setMessage(String message) {
+        this.message = message;
+    }
+
+    public T getData() {
+        return data;
+    }
+
+    public void setData(T data) {
+        this.data = data;
+    }
+}package com.movie.aspect;
+
+import java.lang.reflect.Method;
+import java.time.LocalDateTime;
+
+import org.aspectj.lang.ProceedingJoinPoint;
+import org.aspectj.lang.annotation.Around;
+import org.aspectj.lang.annotation.Aspect;
+import org.aspectj.lang.reflect.MethodSignature;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
+
+import com.movie.annotation.SysLog;
+import com.movie.entity.Log;
+import com.movie.entity.User;
+import com.movie.service.ILogService;
+import com.movie.utils.UserHolder;
+
+import cn.hutool.json.JSONUtil;
+import jakarta.servlet.http.HttpServletRequest;
+
+@Aspect
+@Component
+public class LogAspect {
+
+    @Autowired
+    private ILogService logService;
+
+    @Around("@annotation(com.movie.annotation.SysLog)")
+    public Object saveLog(ProceedingJoinPoint point) throws Throwable {
+        long beginTime = System.currentTimeMillis();
+
+        // 1. 执行目标方法
+        Object result = point.proceed();
+
+        // 2. 计算执行时长
+        long time = System.currentTimeMillis() - beginTime;
+
+        // 3. 异步保存日志
+        recordLog(point, time);
+
+        return result;
+    }
+
+    private void recordLog(ProceedingJoinPoint point, long time) {
+        MethodSignature signature = (MethodSignature) point.getSignature();
+        Method method = signature.getMethod();
+
+        Log sysLog = new Log();
+
+        // --- 1. 设置操作内容 (Action) ---
+        SysLog logAnnotation = method.getAnnotation(SysLog.class);
+        if (logAnnotation != null) {
+            sysLog.setAction(logAnnotation.value());
+        }
+
+        // --- 2. 设置方法名 (Method) ---
+        String className = point.getTarget().getClass().getName();
+        String methodName = signature.getName();
+        sysLog.setMethod(className + "." + methodName + "()");
+
+        // --- 3. 设置参数 (Params) ---
+        // 使用 Hutool 工具类序列化参数，并截取过长内容防止数据库报错
+        try {
+            Object[] args = point.getArgs();
+            String params = JSONUtil.toJsonStr(args);
+            if (params.length() > 500) {
+                params = params.substring(0, 500) + "...";
+            }
+            sysLog.setParams(params);
+        } catch (Exception e) {
+            // 参数解析失败不影响日志记录
+        }
+
+        // --- 4. 设置操作人 (Username) ---
+        User user = UserHolder.getUser();
+        if (user != null) {
+            sysLog.setUsername(user.getUsername());
+        } else {
+            sysLog.setUsername("游客/未登录");
+        }
+
+        // --- 5. 设置 IP 地址 (核心优化) ---
+        // 获取 Request 对象
+        ServletRequestAttributes attributes = (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
+        if (attributes != null) {
+            HttpServletRequest request = attributes.getRequest();
+            String ip = getIpAddr(request); // 使用增强版 IP 获取方法
+            sysLog.setIp(ip);
+        }
+
+        // --- 6. 设置耗时 (Time) - 对应你的数据库字段 ---
+        sysLog.setTime(time); 
+
+        // --- 7. 设置创建时间 ---
+        sysLog.setCreateTime(LocalDateTime.now());
+
+        // 保存到数据库
+        logService.save(sysLog);
+    }
+
+    /**
+     * 获取客户端真实IP地址 (处理代理和本地IPv6问题)
+     */
+    private String getIpAddr(HttpServletRequest request) {
+        String ip = request.getHeader("x-forwarded-for");
+        if (ip == null || ip.length() == 0 || "unknown".equalsIgnoreCase(ip)) {
+            ip = request.getHeader("Proxy-Client-IP");
+        }
+        if (ip == null || ip.length() == 0 || "unknown".equalsIgnoreCase(ip)) {
+            ip = request.getHeader("WL-Proxy-Client-IP");
+        }
+        if (ip == null || ip.length() == 0 || "unknown".equalsIgnoreCase(ip)) {
+            ip = request.getRemoteAddr();
+        }
+        // 处理本地开发环境的 IPv6 地址 0:0:0:0:0:0:0:1 转为 127.0.0.1
+        if ("0:0:0:0:0:0:0:1".equals(ip)) {
+            return "127.0.0.1";
+        }
+        return ip;
+    }
+}package com.movie.annotation;
+
+import java.lang.annotation.Documented;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+
+@Target(ElementType.METHOD) // 作用在方法上
+@Retention(RetentionPolicy.RUNTIME)
+@Documented
+public @interface SysLog {
+    String value() default ""; // 操作描述，例如 "删除电影"
+}

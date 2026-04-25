@@ -1,0 +1,432 @@
+import request from '@/utils/request'
+
+// 获取列表 (搜索)
+export function getActorList(params) {
+  return request({ url: '/actorInfo/list', method: 'get', params })
+}
+// 新增
+export function addActor(data) {
+  return request({ url: '/actorInfo/add', method: 'post', data })
+}
+// 修改
+export function updateActor(data) {
+  return request({ url: '/actorInfo/update', method: 'put', data })
+}
+// 删除
+export function deleteActor(id) {
+  return request({ url: `/actorInfo/delete/${id}`, method: 'delete' })
+}
+import request from '@/utils/request'
+
+// 影院相关
+export function getCinemaList(params) {
+  return request({ url: '/cinema/list', method: 'get', params })
+}
+export function addCinema(data) {
+  return request({ url: '/cinema/add', method: 'post', data })
+}
+export function updateCinema(data) {
+  return request({ url: '/cinema/update', method: 'put', data })
+}
+export function deleteCinema(id) {
+  return request({ url: `/cinema/delete/${id}`, method: 'delete' })
+}
+export function getAllCinemas() {
+  return request({
+    url: '/cinema/list',
+    method: 'get',
+    params: { page: 1, size: 1000 }, // 一次性取回做筛选
+  })
+}
+
+// 影厅相关 (写在一起方便)
+export function getHallList(cinemaId) {
+  return request({ url: `/hall/list/${cinemaId}`, method: 'get' })
+}
+export function addHall(data) {
+  return request({ url: '/hall/add', method: 'post', data })
+}
+export function updateHall(data) {
+  return request({ url: '/hall/update', method: 'put', data })
+}
+export function deleteHall(id) {
+  return request({ url: `/hall/delete/${id}`, method: 'delete' })
+}
+export function getAllHalls() {
+  return request({ url: '/hall/list/all', method: 'get' })
+}
+import request from '@/utils/request'
+
+export function getDirectorList(params) {
+  return request({ url: '/directorInfo/list', method: 'get', params })
+}
+export function addDirector(data) {
+  return request({ url: '/directorInfo/add', method: 'post', data })
+}
+export function updateDirector(data) {
+  return request({ url: '/directorInfo/update', method: 'put', data })
+}
+export function deleteDirector(id) {
+  return request({ url: `/directorInfo/delete/${id}`, method: 'delete' })
+}
+import request from '@/utils/request'
+
+// 上传文件接口
+export function uploadFile(file) {
+  const data = new FormData()
+  data.append('file', file)
+  return request({
+    url: '/file/upload',
+    method: 'post',
+    data,
+    // 告诉 axios 这是一个文件上传
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+}
+import request from '@/utils/request'
+
+export function getLogList(params) {
+  return request({
+    url: '/log/list',
+    method: 'get',
+    params,
+  })
+}
+import request from '@/utils/request'
+
+/**
+ * 获取首页热门电影 Top 10 (或 Top 20)
+ * 对应后端：@GetMapping("/top10")
+ */
+export function getTop10() {
+  return request({
+    url: '/movie/top10',
+    method: 'get',
+  })
+}
+
+/**
+ * 获取电影详情（包含演职人员列表）
+ * 对应后端：@GetMapping("/detail/{id}")
+ */
+export function getMovieDetail(id) {
+  return request({
+    url: `/movie/detail/${id}`,
+    method: 'get',
+  })
+}
+
+/**
+ * 搜索电影（ES 或 数据库模糊查询）
+ * 对应后端：@PostMapping("/search")
+ * @param {Object} data { keyword: string, page: number, size: number }
+ */
+export function searchMovies(data) {
+  return request({
+    url: '/movie/search',
+    method: 'post',
+    data,
+  })
+}
+
+/**
+ * 管理端：分页获取电影列表
+ * 对应后端：@GetMapping("/list")
+ */
+export function getMovieList(params) {
+  return request({
+    url: '/movie/list',
+    method: 'get',
+    params,
+  })
+}
+
+/**
+ * 管理端：发布电影
+ */
+export function addMovie(data) {
+  return request({
+    url: '/movie/add',
+    method: 'post',
+    data,
+  })
+}
+
+/**
+ * 管理端：修改电影
+ */
+export function updateMovie(data) {
+  return request({
+    url: '/movie/update',
+    method: 'put',
+    data,
+  })
+}
+
+/**
+ * 管理端：删除电影
+ */
+export function deleteMovie(id) {
+  return request({
+    url: `/movie/delete/${id}`,
+    method: 'delete',
+  })
+}
+import request from '@/utils/request'
+
+// 管理员分页查询所有订单
+export function getAdminOrderList(params) {
+  return request({
+    url: '/order/admin/list',
+    method: 'get',
+    params, // { page, size, orderNo }
+  })
+}
+
+export function getSeatMap(scheduleId) {
+  return request({
+    url: `/order/seats/${scheduleId}`,
+    method: 'get',
+  })
+}
+export function createOrder(data) {
+  return request({
+    url: '/order/create',
+    method: 'post',
+    data,
+  })
+}
+/**
+ * 根据订单号获取订单详情
+ * 对应后端：OrderController -> (建议补充一个根据单号查详情的接口，如果还没写，
+ * 可以暂时通过 /order/my 列表过滤或后端补充)
+ */
+export function getOrderDetail(orderNo) {
+  return request({
+    url: `/order/detail/${orderNo}`, // 假设后端有这个路径，如果没有请联系我修改
+    method: 'get',
+  })
+}
+
+/**
+ * 支付订单
+ * 对应后端：OrderController -> @PostMapping("/pay")
+ * data: { orderNo: string, payPassword: password }
+ */
+export function payOrder(data) {
+  return request({
+    url: '/order/pay',
+    method: 'post',
+    data,
+  })
+}
+
+// ... 之前的接口 ...
+
+// 获取我的订单列表
+export function getMyOrders(params) {
+  return request({
+    url: '/order/my',
+    method: 'get',
+    params, // { page, size, status }
+  })
+}
+
+// 手动取消订单
+export function cancelOrder(orderNo) {
+  return request({
+    url: `/order/cancel/${orderNo}`,
+    method: 'post',
+  })
+}
+
+// 申请退款 (仅演示，部分逻辑可能需要后端支持)
+export function refundOrder(orderNo) {
+  return request({
+    url: `/order/refund/${orderNo}`,
+    method: 'post',
+  })
+}
+import request from '@/utils/request'
+
+// 获取首页统计数据
+export function getReportData() {
+  return request({
+    url: '/report/index',
+    method: 'get',
+  })
+}
+import request from '@/utils/request'
+
+// 管理员获取所有影评 (支持关键词搜索)
+export function getAdminReviewList(params) {
+  return request({
+    url: '/review/admin/list',
+    method: 'get',
+    params,
+  })
+}
+
+// 删除影评
+export function deleteReview(id) {
+  return request({
+    url: `/review/delete/${id}`,
+    method: 'delete',
+  })
+}
+
+// 获取某条影评下的回复 (复用原有接口)
+export function getReplyList(reviewId, params) {
+  return request({
+    url: `/reply/list/${reviewId}`,
+    method: 'get',
+    params,
+  })
+}
+
+// 删除回复
+export function deleteReply(id) {
+  return request({
+    url: `/reply/delete/${id}`,
+    method: 'delete',
+  })
+}
+export function getReviewList(movieId, params) {
+  return request({
+    url: `/review/list/${movieId}`,
+    method: 'get',
+    params,
+  })
+}
+import request from '@/utils/request'
+
+// 根据电影ID查询排片
+export function getScheduleList(movieId) {
+  return request({
+    url: `/schedule/admin/list/${movieId}`,
+    method: 'get',
+  })
+}
+
+// 新增排片
+export function addSchedule(data) {
+  return request({
+    url: '/schedule/add',
+    method: 'post',
+    data, // { cinemaId, hallId, movieId, startTime, price }
+  })
+}
+
+// 删除排片
+export function deleteSchedule(id) {
+  return request({
+    url: `/schedule/delete/${id}`,
+    method: 'delete',
+  })
+}
+
+// 获取某部电影的所有排片场次（只查未开场的）
+export function getUserScheduleList(movieId, cinemaId = null) {
+  return request({
+    url: `/schedule/list/${movieId}`,
+    method: 'get',
+    params: { cinemaId }, // 传给后端过滤
+  })
+}
+import request from '@/utils/request' // 导入我们封装的 axios
+
+// 登录接口
+export function login(data) {
+  return request({
+    url: '/user/login',
+    method: 'post',
+    data,
+  })
+}
+
+// 获取用户信息
+export function getInfo() {
+  return request({
+    url: '/user/me',
+    method: 'get',
+  })
+}
+
+// 管理员获取用户列表
+export function getUserList(params) {
+  return request({
+    url: '/user/list',
+    method: 'get',
+    params,
+  })
+}
+
+// 修改用户状态 (封号/解封)
+// status: 0禁用 1正常
+export function updateUserStatus(userId, status) {
+  return request({
+    url: `/user/status/${userId}/${status}`,
+    method: 'put',
+  })
+}
+
+export function register(data) {
+  return request({
+    url: '/user/register',
+    method: 'post',
+    data,
+  })
+}
+export function updateUserInfo(data) {
+  return request({
+    url: '/user/update',
+    method: 'put',
+    data,
+  })
+}
+
+export function updateLoginPassword(data) {
+  return request({
+    url: '/user/password',
+    method: 'put',
+    data, // { oldPassword, newPassword }
+  })
+}
+import request from '@/utils/request'
+
+// 获取钱包信息（余额等）
+export function getWalletInfo() {
+  return request({
+    url: '/userWallet/info',
+    method: 'get',
+  })
+}
+
+// 设置支付密码 (第一次设置)
+export function setPayPassword(data) {
+  return request({
+    url: '/userWallet/set-password',
+    method: 'post',
+    data, // { payPassword: "..." }
+  })
+}
+
+// 修改支付密码
+export function changePayPassword(data) {
+  return request({
+    url: '/userWallet/change-password',
+    method: 'post',
+    data, // { oldPassword, newPassword }
+  })
+}
+
+// 充值
+export function rechargeWallet(data) {
+  return request({
+    url: '/userWallet/recharge',
+    method: 'post',
+    data, // { amount: 100 }
+  })
+}
